@@ -1,2 +1,5 @@
-# VisionFlow
-Build a real-time gesture control system with Streamlit! A step-by-step tutorial for Air Canvas and interactive object control using hand tracking.
+opencv-python>=4.8.0
+mediapipe>=0.10.0
+streamlit>=1.28.0
+numpy>=1.24.0
+Pillow>=10.0.0
