@@ -1,191 +1,172 @@
-"""
-Modul pengenalan isyarat tangan menggunakan MediaPipe.
-Mengesan 21 titik landmark dan mengklasifikasikan isyarat.
-"""
-
+import cv2
+import streamlit as st
 import mediapipe as mp
 import numpy as np
 
-mp_hands = mp.solutions.hands
+# ─────────────────────────────────────────────
+# Streamlit Configuration
+# ─────────────────────────────────────────────
+st.set_page_config(
+    page_title="AI Gesture Controller",
+    page_icon="🎨",
+    layout="wide",
+)
+
+# Initialize MediaPipe Hands
+mp_hands = mp.solutions.hands 
 mp_drawing = mp.solutions.drawing_utils
-mp_drawing_styles = mp.solutions.drawing_styles
+hands = mp_hands.Hands(
+    min_detection_confidence=0.8,
+    min_tracking_confidence=0.7
+)
 
+# Initialize Session State
+if 'char_x' not in st.session_state:
+    st.session_state.char_x = 400
+if 'char_y' not in st.session_state:
+    st.session_state.char_y = 300
+if 'run_camera' not in st.session_state:
+    st.session_state.run_camera = False
+if 'draw_points' not in st.session_state:
+    st.session_state.draw_points = []  # Stores drawing coordinates
 
-class GestureRecognizer:
-    """
-    Kelas utama untuk mengesan dan mengenali isyarat tangan.
-    """
+# ─────────────────────────────────────────────
+# User Interface (Sidebar & Controls)
+# ─────────────────────────────────────────────
+st.title("🕹️ AI Gesture Studio")
+st.markdown("Select a mode below and use your hand gestures in front of the camera.")
 
-    GESTURE_LABELS = {
-        "thumbs_up":    "Ibu Jari Atas",
-        "thumbs_down":  "Ibu Jari Bawah",
-        "open_hand":    "Tapak Tangan Terbuka",
-        "fist":         "Penumbuk",
-        "peace":        "Dua Jari (Peace)",
-        "pointing":     "Tunjuk",
-        "ok":           "OK",
-        "none":         "Tiada Isyarat",
-    }
+# Mode Selection
+mode = st.radio(
+    "Select Control Mode:",
+    ["Character Control (Joystick)", "Air Canvas (Drawing)"],
+    horizontal=True
+)
 
-    GESTURE_ACTIONS = {
-        "thumbs_up":    "Play Media",
-        "thumbs_down":  "Stop Media",
-        "open_hand":    "Pause / Berhenti",
-        "fist":         "Kunci Skrin",
-        "peace":        "Tukar Tetingkap",
-        "pointing":     "Gerakkan Kursor",
-        "ok":           "Sahkan / OK",
-        "none":         "-",
-    }
+col1, col2, col3 = st.columns([1, 1, 1])
+with col1:
+    if st.button("🚀 Start Camera", use_container_width=True):
+        st.session_state.run_camera = True
+with col2:
+    if st.button("🛑 Stop Camera", use_container_width=True):
+        st.session_state.run_camera = False
+with col3:
+    if st.button("🧹 Clear Canvas", use_container_width=True):
+        st.session_state.draw_points = []
 
-    def __init__(self, max_hands=1, detection_confidence=0.7, tracking_confidence=0.5):
-        self.hands = mp_hands.Hands(
-            static_image_mode=False,
-            max_num_hands=max_hands,
-            min_detection_confidence=detection_confidence,
-            min_tracking_confidence=tracking_confidence,
-        )
+# Short instructions based on mode
+if mode == "Character Control (Joystick)":
+    st.info("💡 **How to use:** Point your index finger and move it Up, Down, Left, or Right.")
+else:
+    st.info("💡 **How to use:** Bring your index & middle fingers together to **DRAW**. Separate them to **STOP**.")
 
-    def process(self, frame_rgb):
-        """
-        Proses bingkai dan kembalikan keputusan MediaPipe.
-        frame_rgb: numpy array dalam format RGB
-        """
-        return self.hands.process(frame_rgb)
+video_placeholder = st.empty()
 
-    def get_landmarks(self, results, frame_shape):
-        """
-        Ekstrak koordinat 21 landmark tangan.
-        Kembalikan senarai dict {x, y, z} dinormalisasi.
-        """
-        if not results.multi_hand_landmarks:
-            return None
-        h, w = frame_shape[:2]
-        lm_list = []
-        for lm in results.multi_hand_landmarks[0].landmark:
-            lm_list.append({
-                "x": lm.x,
-                "y": lm.y,
-                "z": lm.z,
-                "px": int(lm.x * w),
-                "py": int(lm.y * h),
-            })
-        return lm_list
+# ─────────────────────────────────────────────
+# Main Loop
+# ─────────────────────────────────────────────
+if st.session_state.run_camera:
+    cap = cv2.VideoCapture(0)
+    
+    while st.session_state.run_camera:
+        ret, frame = cap.read()
+        if not ret:
+            st.error("Camera not detected.")
+            break
 
-    def recognize_gesture(self, landmarks):
-        """
-        Klasifikasikan isyarat berdasarkan kedudukan landmark.
-        Menggunakan logik geometri jari.
-        """
-        if landmarks is None:
-            return "none"
+        frame = cv2.flip(frame, 1)  # Mirroring
+        h, w, _ = frame.shape
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = hands.process(frame_rgb)
+        
+        # Prepare a Dark Canvas on the right side
+        char_canvas = np.zeros((h, 800, 3), dtype=np.uint8)
+        char_canvas[:] = (25, 25, 25)  # Dark background color
+        
+        current_gesture = "STATIONARY"
 
-        # Indeks landmark MediaPipe:
-        # 4=ibu jari hujung, 8=telunjuk hujung, 12=tengah hujung
-        # 16=manis hujung, 20=kelingking hujung
-        # 3=ibu jari sendi, 6=telunjuk knuckle, 10=tengah knuckle
-        # 14=manis knuckle, 18=kelingking knuckle
-
-        fingers_up = self._count_fingers_up(landmarks)
-        thumb_up = self._is_thumb_up(landmarks)
-        thumb_down = self._is_thumb_down(landmarks)
-
-        total_up = sum(fingers_up[1:])  # telunjuk hingga kelingking
-
-        # Logik pengenalan
-        if thumb_up and total_up == 0:
-            return "thumbs_up"
-
-        if thumb_down and total_up == 0:
-            return "thumbs_down"
-
-        if all(f == 1 for f in fingers_up[1:]) and total_up == 4:
-            return "open_hand"
-
-        if total_up == 0 and not thumb_up:
-            return "fist"
-
-        if fingers_up[1] == 1 and fingers_up[2] == 1 and total_up == 2:
-            return "peace"
-
-        if fingers_up[1] == 1 and total_up == 1:
-            return "pointing"
-
-        if self._is_ok_gesture(landmarks):
-            return "ok"
-
-        return "none"
-
-    def _count_fingers_up(self, lm):
-        """
-        Semak sama ada setiap jari (telunjuk-kelingking) tegak.
-        Kembalikan senarai [ibu_jari, telunjuk, tengah, manis, kelingking].
-        """
-        tips = [4, 8, 12, 16, 20]
-        pips = [3, 6, 10, 14, 18]
-        fingers = []
-
-        # Ibu jari: bandingkan x (lateral)
-        fingers.append(1 if lm[tips[0]]["x"] < lm[pips[0]]["x"] else 0)
-
-        # Jari lain: bandingkan y (atas/bawah)
-        for i in range(1, 5):
-            fingers.append(1 if lm[tips[i]]["y"] < lm[pips[i]]["y"] else 0)
-
-        return fingers
-
-    def _is_thumb_up(self, lm):
-        """Ibu jari hujung lebih tinggi dari pangkal."""
-        return lm[4]["y"] < lm[2]["y"] - 0.05
-
-    def _is_thumb_down(self, lm):
-        """Ibu jari hujung lebih rendah dari pangkal."""
-        return lm[4]["y"] > lm[2]["y"] + 0.05
-
-    def _is_ok_gesture(self, lm):
-        """
-        Isyarat OK: hujung ibu jari dan telunjuk berdekatan,
-        jari lain tegak.
-        """
-        thumb_tip = np.array([lm[4]["x"], lm[4]["y"]])
-        index_tip = np.array([lm[8]["x"], lm[8]["y"]])
-        dist = np.linalg.norm(thumb_tip - index_tip)
-        fingers_up = self._count_fingers_up(lm)
-        other_fingers_up = sum(fingers_up[2:])
-        return dist < 0.06 and other_fingers_up >= 2
-
-    def draw_landmarks(self, frame_bgr, results):
-        """
-        Lukis landmark dan sambungan tangan pada bingkai BGR.
-        """
         if results.multi_hand_landmarks:
-            for hand_lm in results.multi_hand_landmarks:
-                mp_drawing.draw_landmarks(
-                    frame_bgr,
-                    hand_lm,
-                    mp_hands.HAND_CONNECTIONS,
-                    mp_drawing_styles.get_default_hand_landmarks_style(),
-                    mp_drawing_styles.get_default_hand_connections_style(),
-                )
-        return frame_bgr
+            # Get the first detected hand
+            hand_landmarks = results.multi_hand_landmarks[0]
+            landmarks = hand_landmarks.landmark
+            
+            # Reference points (Index Finger & Middle Finger)
+            index_tip = landmarks[mp_hands.HandLandmark.INDEX_FINGER_TIP]
+            index_mcp = landmarks[mp_hands.HandLandmark.INDEX_FINGER_MCP]
+            middle_tip = landmarks[mp_hands.HandLandmark.MIDDLE_FINGER_TIP]
 
-    def get_hand_bbox(self, landmarks, frame_shape):
-        """
-        Dapatkan kotak sempadan (bounding box) tangan.
-        Kembalikan (x_min, y_min, x_max, y_max) dalam piksel.
-        """
-        if landmarks is None:
-            return None
-        h, w = frame_shape[:2]
-        xs = [lm["px"] for lm in landmarks]
-        ys = [lm["py"] for lm in landmarks]
-        pad = 20
-        return (
-            max(0, min(xs) - pad),
-            max(0, min(ys) - pad),
-            min(w, max(xs) + pad),
-            min(h, max(ys) + pad),
-        )
+            # ---------------------------------------------------------
+            # MODE 1: CHARACTER CONTROL
+            # ---------------------------------------------------------
+            if mode == "Character Control (Joystick)":
+                dx = index_tip.x - index_mcp.x
+                dy = index_tip.y - index_mcp.y
+                threshold = 0.07 
 
-    def close(self):
-        self.hands.close()
+                if abs(dx) > abs(dy):
+                    if dx > threshold:
+                        current_gesture = "RIGHT"
+                        st.session_state.char_x += 20
+                    elif dx < -threshold:
+                        current_gesture = "LEFT"
+                        st.session_state.char_x -= 20
+                else:
+                    if dy > threshold:
+                        current_gesture = "DOWN"
+                        st.session_state.char_y += 20
+                    elif dy < -threshold:
+                        current_gesture = "UP"
+                        st.session_state.char_y -= 20
+                
+                # Keep character within boundaries
+                st.session_state.char_x = max(30, min(800 - 30, st.session_state.char_x))
+                st.session_state.char_y = max(30, min(h - 30, st.session_state.char_y))
+                
+                # Draw Character
+                cv2.circle(char_canvas, (st.session_state.char_x, st.session_state.char_y), 25, (0, 255, 127), -1)
+                cv2.circle(char_canvas, (st.session_state.char_x, st.session_state.char_y), 28, (255, 255, 255), 2)
+
+            # ---------------------------------------------------------
+            # MODE 2: AIR CANVAS (DRAWING)
+            # ---------------------------------------------------------
+            else:
+                # Convert normalized coordinates to pixel (for 800px wide canvas)
+                cx, cy = int(index_tip.x * 800), int(index_tip.y * h)
+                
+                # Calculate distance between index and middle finger (Euclidean distance)
+                dist = np.sqrt((index_tip.x - middle_tip.x)**2 + (index_tip.y - middle_tip.y)**2)
+                
+                if dist < 0.05: # Fingers closed (Drawing Mode)
+                    current_gesture = "DRAWING"
+                    st.session_state.draw_points.append((cx, cy))
+                else: # Fingers apart (Hover/Moving Mode)
+                    current_gesture = "HOVERING"
+                    st.session_state.draw_points.append(None) # "None" starts a new line segment
+
+                # Draw all stored lines
+                for i in range(1, len(st.session_state.draw_points)):
+                    if st.session_state.draw_points[i-1] is not None and st.session_state.draw_points[i] is not None:
+                        cv2.line(char_canvas, st.session_state.draw_points[i-1], 
+                                 st.session_state.draw_points[i], (0, 200, 255), 6)
+                
+                # Draw cursor (small circle) at finger tip
+                cv2.circle(char_canvas, (cx, cy), 10, (255, 255, 255), -1)
+
+            # Draw hand landmarks on the camera feed
+            mp_drawing.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+
+        # Add Text Info on Canvas
+        cv2.putText(char_canvas, f"MODE: {mode}", (20, 40), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2)
+        cv2.putText(char_canvas, f"ACTION: {current_gesture}", (20, 75), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 127), 2)
+
+        # Combine camera video and canvas side-by-side
+        combined_output = np.hstack([frame, char_canvas])
+        
+        # Display in Streamlit
+        video_placeholder.image(combined_output, channels="BGR", use_container_width=True)
+
+    cap.release()
+else:
+    st.info("System is in Standby mode. Click 'Start Camera' to begin.")
