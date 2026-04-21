@@ -1,96 +1,136 @@
 """
-Pengurus kamera untuk menangkap aliran video USB webcam.
-Menyokong pelbagai indeks kamera dan resolusi.
+Pelaksana tindakan sistem berdasarkan isyarat tangan yang dikenali.
+Setiap isyarat dipetakan kepada tindakan kawalan komputer.
 """
 
-import cv2
-import numpy as np
+import subprocess
+import platform
+import time
 
 
-class CameraManager:
+class ActionExecutor:
     """
-    Pengurus kamera yang mengendalikan sambungan, pembacaan bingkai,
-    dan pelepasan sumber kamera.
+    Melaksanakan tindakan sistem sebenar berdasarkan isyarat.
+    Menyokong Linux (untuk Jetson) dengan fallback untuk OS lain.
     """
 
-    def __init__(self, camera_index=0, width=640, height=480, fps=30):
-        self.camera_index = camera_index
-        self.width = width
-        self.height = height
-        self.fps = fps
-        self.cap = None
-        self._is_open = False
-
-    def open(self):
+    def __init__(self, cooldown_seconds=1.5):
         """
-        Buka sambungan kamera. Kembalikan True jika berjaya.
+        cooldown_seconds: masa minimum antara tindakan berulang
+        untuk mengelakkan pencetus yang tidak sengaja.
         """
-        self.cap = cv2.VideoCapture(self.camera_index)
-        if not self.cap.isOpened():
-            return False
+        self.cooldown = cooldown_seconds
+        self._last_action_time = {}
+        self._last_gesture = None
+        self.os_type = platform.system()
+        self.action_log = []
 
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
-        self.cap.set(cv2.CAP_PROP_FPS, self.fps)
-        # Kurangkan buffer untuk kurangkan latensi
-        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-
-        self._is_open = True
-        return True
-
-    def read_frame(self):
+    def execute(self, gesture):
         """
-        Baca satu bingkai dari kamera.
-        Kembalikan (success, frame_bgr).
+        Jalankan tindakan berpadanan dengan isyarat.
+        Kembalikan nama tindakan yang dilaksanakan atau None.
         """
-        if not self._is_open or self.cap is None:
-            return False, None
-        ret, frame = self.cap.read()
-        if not ret:
-            return False, None
-        # Cermin bingkai (mirror) supaya lebih natural untuk pengguna
-        frame = cv2.flip(frame, 1)
-        return True, frame
+        if gesture == "none" or gesture == self._last_gesture:
+            self._last_gesture = gesture
+            return None
 
-    def get_actual_resolution(self):
-        """
-        Dapatkan resolusi sebenar yang dikonfigurasikan oleh kamera.
-        """
-        if self.cap is None:
-            return (self.width, self.height)
-        w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        return (w, h)
+        now = time.time()
+        last = self._last_action_time.get(gesture, 0)
+        if now - last < self.cooldown:
+            return None
 
-    def get_actual_fps(self):
-        if self.cap is None:
-            return self.fps
-        return self.cap.get(cv2.CAP_PROP_FPS)
+        action_map = {
+            "thumbs_up":    self._action_play,
+            "thumbs_down":  self._action_stop,
+            "open_hand":    self._action_pause,
+            "fist":         self._action_lock,
+            "peace":        self._action_switch_window,
+            "pointing":     self._action_move_cursor,
+            "ok":           self._action_confirm,
+        }
 
-    def release(self):
-        """Lepaskan sumber kamera."""
-        if self.cap is not None:
-            self.cap.release()
-        self._is_open = False
-        self.cap = None
+        fn = action_map.get(gesture)
+        if fn:
+            result = fn()
+            self._last_action_time[gesture] = now
+            self._last_gesture = gesture
+            if result:
+                self.action_log.append({
+                    "time": time.strftime("%H:%M:%S"),
+                    "gesture": gesture,
+                    "action": result,
+                })
+                # Simpan hanya 20 rekod terkini
+                self.action_log = self.action_log[-20:]
+            return result
 
-    def is_open(self):
-        return self._is_open
+        self._last_gesture = gesture
+        return None
 
-    @staticmethod
-    def bgr_to_rgb(frame_bgr):
-        """Tukar format BGR (OpenCV) kepada RGB (Streamlit/Pillow)."""
-        return cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+    def reset_last_gesture(self):
+        """Reset supaya isyarat sama boleh dicetuskan semula."""
+        self._last_gesture = None
 
-    @staticmethod
-    def list_available_cameras(max_check=5):
-        """
-        Senaraikan indeks kamera yang tersedia pada sistem.
-        """
-        available = []
-        for i in range(max_check):
-            cap = cv2.VideoCapture(i)
-            if cap.isOpened():
-                available.append(i)
-                cap.release()
-        return available
+    # ----------------------------------------------------------
+    # Tindakan individual
+    # ----------------------------------------------------------
+
+    def _action_play(self):
+        """Hantar kekunci Space untuk play/pause media player."""
+        self._send_key("space")
+        return "Play Media (Space)"
+
+    def _action_stop(self):
+        """Hentikan media — hantar kekunci S."""
+        self._send_key("s")
+        return "Stop Media (S)"
+
+    def _action_pause(self):
+        """Pause — hantar kekunci Space."""
+        self._send_key("space")
+        return "Pause/Resume (Space)"
+
+    def _action_lock(self):
+        """Kunci skrin."""
+        if self.os_type == "Linux":
+            self._run_cmd(["loginctl", "lock-session"])
+        return "Kunci Skrin"
+
+    def _action_switch_window(self):
+        """Alt+Tab untuk tukar tetingkap."""
+        self._send_key_combo(["alt", "Tab"])
+        return "Tukar Tetingkap (Alt+Tab)"
+
+    def _action_move_cursor(self):
+        """Placeholder — kawalan kursor memerlukan koordinat landmark."""
+        return "Mod Kawalan Kursor Aktif"
+
+    def _action_confirm(self):
+        """Tekan Enter sebagai pengesahan."""
+        self._send_key("Return")
+        return "Sahkan (Enter)"
+
+    # ----------------------------------------------------------
+    # Pembantu menghantar kekunci
+    # ----------------------------------------------------------
+
+    def _send_key(self, key):
+        """Hantar satu kekunci menggunakan xdotool (Linux)."""
+        if self.os_type == "Linux":
+            self._run_cmd(["xdotool", "key", key])
+
+    def _send_key_combo(self, keys):
+        """Hantar kombinasi kekunci seperti Alt+Tab."""
+        if self.os_type == "Linux":
+            self._run_cmd(["xdotool", "key", "+".join(keys)])
+
+    def _run_cmd(self, cmd):
+        """Jalankan arahan sistem secara senyap."""
+        try:
+            subprocess.run(cmd, capture_output=True, timeout=2)
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass  # xdotool mungkin tidak dipasang — abaikan
+
+    def get_log(self):
+        """Kembalikan log tindakan terkini."""
+        return list(reversed(self.action_log))
